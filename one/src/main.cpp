@@ -24,6 +24,7 @@
 #include "core/walkie_codec.h"
 #include "core/walkie_store.h"
 #include "core/walkie_audio.h"
+#include "core/walkie_chime.h"
 #include "core/walkie_radio.h"
 
 alphapi::LGFX_AlphaPiOne display;
@@ -345,49 +346,6 @@ static bool codecPlayPCM(const uint8_t *data, size_t len)
         xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY);
     }
     return true;
-}
-
-// 马里奥吃金币（NES APU 还原）：方波 + 阶梯衰减包络。
-// 实测 coin.wav：B5(988Hz) 0-80ms，E6(1319Hz) 80-820ms 每 60ms 衰减一档。
-// 短音听不到是因为 N32 起播有启动延迟吃掉开头：前导 120ms 静音让 DAC 先转起来，
-// 短音拉长到 110ms，两音间 25ms 间隙。整体幅度 ~1 音量（峰值 8）。
-static void coinSound()
-{
-    constexpr uint32_t rate = 24000;
-    constexpr uint32_t leadMs = 120;    // 静音引导，盖过 N32 起播延迟
-    constexpr uint32_t b5Ms = 110;      // 短音
-    constexpr uint32_t gapMs = 25;      // 两音间隙
-    constexpr uint32_t e6Ms = 740;      // 长音
-    uint8_t buf[200];
-    uint32_t total = rate * (leadMs + b5Ms + gapMs + e6Ms) / 1000;
-    uint32_t phase = 0;
-    uint32_t halfB5 = rate / (2u * 988);
-    uint32_t halfE6 = rate / (2u * 1319);
-    for (uint32_t done = 0; done < total; )
-    {
-        size_t n = (total - done) > sizeof(buf) ? sizeof(buf) : (size_t)(total - done);
-        for (size_t i = 0; i < n; i++)
-        {
-            uint32_t idx = done + (uint32_t)i;
-            uint32_t ms = idx * 1000 / rate;
-            int amp = 0;
-            uint32_t half = halfB5;
-            if (ms < leadMs) amp = 0;                       // 静音引导
-            else if (ms < leadMs + b5Ms) { amp = 8; half = halfB5; }
-            else if (ms < leadMs + b5Ms + gapMs) amp = 0;   // 间隙
-            else
-            {
-                uint32_t step = (ms - leadMs - b5Ms - gapMs) / 60;
-                amp = 7 - (int)step;
-                if (amp < 1) amp = 1;
-                half = halfE6;
-            }
-            phase++;
-            buf[i] = ((phase / half) & 1u) ? (uint8_t)(128 + amp) : (uint8_t)(128 - amp);
-        }
-        if (!codecPlayPCM(buf, n)) return;
-        done += n;
-    }
 }
 
 static bool codecStartMic() { g_playReady = false; return codecControl(0x01); }
@@ -1351,7 +1309,7 @@ void loop()
     if (gPeerJoined)
     {
         gPeerJoined = false;
-        if (g_mode != Mode::Transmit) coinSound();
+        if (g_mode != Mode::Transmit) walkie::playCoinChime(codecPlayPCM);
     }
 
     // 闭环功率控制：依据对端反馈，1s 最多动一档
