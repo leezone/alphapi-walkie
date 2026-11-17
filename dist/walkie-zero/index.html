@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlphaPi Walkie Zero — Web 刷机</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background: #1a1d23; color: #e6e6e6;
+         max-width: 640px; margin: 40px auto; padding: 0 20px; line-height: 1.7; }
+  h1 { color: #4dd0e1; font-size: 1.5em; }
+  .by { color: #888; font-size: .85em; margin-top: -12px; }
+  .card { background: #242830; border-radius: 10px; padding: 20px; margin: 20px 0; }
+  code { background: #0d1117; padding: 2px 6px; border-radius: 4px; color: #7ee787; font-size: .9em; }
+  pre { background: #0d1117; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: .85em; }
+  .warn { color: #f0a040; }
+  esp-web-install-button { --esp-tools-button-color: #4dd0e1; --esp-tools-button-text-color: #1a1d23; }
+  table { border-collapse: collapse; width: 100%; font-size: .9em; }
+  td, th { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+</style>
+</head>
+<body>
+<h1>AlphaPi Walkie Zero</h1>
+<p class="by">by leezone · ESP32-C3 (AlphaPi Zero) · ESP-NOW 对讲机 · 5×5 点阵</p>
+
+<div class="card">
+  <h3>① 一键刷机（Chrome / Edge，需 HTTPS 或 localhost）</h3>
+  <p>USB 连接 Zero，点击下方按钮，选择串口即可。布局：Arduino 默认（app0@0x10000）：</p>
+  <table>
+    <tr><th>偏移</th><th>内容</th></tr>
+    <tr><td><code>0x0000</code></td><td>Arduino bootloader（C3 固定布局）</td></tr>
+    <tr><td><code>0x8000</code></td><td>Arduino 分区表（app0@0x10000 + factory）</td></tr>
+    <tr><td><code>0xe000</code></td><td>otadata（出厂默认 boot app0）</td></tr>
+    <tr><td><code>0x10000</code></td><td>对讲机 app</td></tr>
+  </table>
+  <br>
+  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+  <p class="warn">注意：首次从其他固件（如 MicroPython）切换时，若无法启动，
+  需先清 otadata：<code>erase-region 0xd000 0x2000</code>（不要动 0x9000 的 NVS）。</p>
+</div>
+
+<div class="card">
+  <h3>② 命令行分段刷（推荐，USB bridge 偶发掉线可重试）</h3>
+  <pre>ALPHAPI_VID=2f4e ALPHAPI_PID=0103 ALPHAPI_OUT_EP=0x03 ALPHAPI_IN_EP=0x81 \
+python3 tools/alphapi-flash/flash-retry.py bootloader.bin 0x0
+python3 tools/alphapi-flash/flash-retry.py partition-table.bin 0x8000
+python3 tools/alphapi-flash/flash-retry.py boot_app0.bin 0xe000
+python3 tools/alphapi-flash/flash-retry.py walkie-zero.bin 0x10000</pre>
+  <p>已刷过本系统固件的板子只需最后一条（app 到 0x10000）。Zero 的 bridge 是 raw usbfs（HETAO AlphaPi_ZEROS 0103），必须走该工具。</p>
+</div>
+
+<div class="card">
+  <h3>③ 整片镜像（8MB，从 0x0 一次写入，会清 NVS）</h3>
+  <pre>ALPHAPI_VID=2f4e ALPHAPI_PID=0103 ALPHAPI_OUT_EP=0x03 ALPHAPI_IN_EP=0x81 \
+python3 tools/alphapi-flash/alphapi-flash.py esptool --before no-reset \
+  --after no-reset --baud 115200 write-flash -z 0x0 walkie-zero-full.bin</pre>
+  <p class="warn">整片写入会擦除 NVS（名字/信道/音量设置丢失），仅在布局混乱时用。</p>
+</div>
+
+<div class="card">
+  <h3>使用说明</h3>
+  <ul>
+    <li><b>A</b> 说（PTT）· <b>B</b> 显示信道号 / <b>C</b> 密码视图（单击=一次动作）</li>
+    <li><b>A 先按住</b>：后俩键只调音量（B=− C=+）；<b>B 先按住</b>：后俩键只调信道；<b>C 先按住</b>：后俩键只进密码（A=0 B=1）</li>
+    <li>密码视图无密码 → 全屏 X；有密码 → 每位一灯，1 亮 0 半亮</li>
+    <li>上线提示音：马里奥金币；功率三档闭环自动调节（信号条显示档位）</li>
+  </ul>
+</div>
+</body>
+</html>

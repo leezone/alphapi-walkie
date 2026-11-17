@@ -1,19 +1,14 @@
 # AlphaPi Walkie
 
-AlphaPi One S（ESP32-S2R2）对讲机固件：按住说话、松开发送，局域网内 ESP-NOW 直连，不走路由器、不需要蜂窝网络。
+AlphaPi 系列小板的对讲机固件：按住说话、松开发送，局域网内 ESP-NOW 直连，不走路由器、不需要蜂窝网络。适用于三款开发板：
+
+- **AlphaPi One S**（`one-s/`，ESP32-S2，ST7735 160×128，四键）
+- **AlphaPi Zero**（`zero/`，ESP32-C3，5×5 LED 点阵，三键）
+- **AlphaPi One S3**（`one-s3/`，ESP32-S3，ST7789 160×128，四键）
+
+三端共用 `core/` 里的协议、加密、功控、音频实现；设备差异（面板、按键、协处理器波特率、字体等）均在各自的 `src/device/` 下。
 
 [![license](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
-
-## 硬件
-
-| 项目 | 规格 |
-|---|---|
-| 开发板 | **AlphaPi One S** |
-| 主控 | ESP32-S2R2（Xtensa LX7 单核 240MHz，WiFi，无蓝牙） |
-| Flash / PSRAM | 8 MB Flash / 2 MB PSRAM |
-| 屏幕 | ST7735，160×128 横屏，RGB565 |
-| 音频 | N32 UART 协处理器，460800 baud，8-bit 无符号单声道 @ 24 kHz |
-| 按键 | 前置 A / B / C / D 四键（高电平有效）：A=PTT，B=配对页入口，C/D=音量 −/+ |
 
 ## 功能
 
@@ -23,9 +18,13 @@ AlphaPi One S（ESP32-S2R2）对讲机固件：按住说话、松开发送，局
 - **闭环功率控制**：根据对端丢包率与接收信号自动调节发射功率三档（8.5 / 13 / 17 dBm），屏幕信号条实时显示当前档位。
 - **接收丢帧补偿**：收到的语音攒够水位再起播，卡顿时用前一帧衰减补帧，不把欠载放大成空洞。
 - **AES-128-CTR 加密**：按密码派生密钥（SHA-256），密码以位串输入，空=不加密。
-- **全中文界面**：底层自绘中文字库（GB2312 一级字库 3756 字，HZK16），配对页显示邻居列表与信道占用图。
+- **全中文界面**（One S / One S3）：GB2312 一级字库 3756 字，HZK16。
+- **5×5 点阵显示**（Zero）：形状+MAC 尾号滚动、信道号/密码视图/音量档，加密时锁字形排在机器名前。
+- **上线提示音**：马里奥金币音。
 
 ## 按键
+
+### One S / One S3（四键 A/B/C/D）
 
 | 页面 | 键位 | 作用 |
 |---|---|---|
@@ -37,55 +36,56 @@ AlphaPi One S（ESP32-S2R2）对讲机固件：按住说话、松开发送，局
 
 所有按键均为上升沿触发，松手算一次，不重复响应。
 
+### Zero（三键 A/B/C）
+
+| 键位 | 作用 |
+|---|---|
+| A（按住） | 发言（PTT）；A 先按住 = 音量模式，B/C 只调音量 |
+| B（单击） | 先按住 = 信道模式（A/C 改信道）；单按 = 显示信道号 |
+| C（单击） | 先按住 = 密码模式（A=位 0 / B=位 1）；单按 = 密码视图 |
+| C（长按 ≥10s） | 清空密码 |
+
+密码视图：先按 A 后按 B，进入 5×5 点阵密码显示——
+- 无密码：全屏 X
+- 有密码：位数 = 灯数，1 恒亮 / 0 半亮（闪烁）
+
 ## 从源码编译
 
-实测环境：PlatformIO（`lolin_s2_mini` 板型）+ Arduino 框架，LovyanGFX 驱动 ST7735。
+环境：PlatformIO（对应板型）+ Arduino 框架。
 
 ```bash
 # 依赖：PlatformIO Core（首次会下载工具链 ~200MB）
-cd alphapi-walkie
-pio run
+cd one-s && pio run          # One S
+cd zero   && pio run          # Zero
+cd one-s3 && pio run          # One S3
 ```
 
-产物：`.pio/build/lolin_s2_mini/firmware.bin`
+产物：`one-s/.pio/build/lolin_s2_mini/firmware.bin`（对应板型目录下的 `.pio/build/...`）
 
 ## 刷机
 
-布局为 Arduino 默认 ota 布局（`app0@0x10000`，与 Zero / One S3 一致）：
+`dist/` 下是刷机页面与分段固件（esp-web-tools WebSerial）：
 
 ```
-0x1000  bootloader.bin      Arduino 二级 bootloader
-0x8000  partition-table.bin Arduino 默认分区表（app0@0x10000）
-0xe000  boot_app0.bin       otadata（factory → app0）
-0x10000 alphapi-walkie.bin  本固件
+dist/walkie-one-s/index.html    One S 刷机页（按页面上的说明刷）
+dist/walkie-zero/index.html     Zero 刷机页
+dist/walkie-one-s3/index.html   One S3 刷机页
 ```
 
-命令行示例（esptool）：
-
-```bash
-python3 -m esptool --port /dev/ttyACM0 --chip esp32s2 write_flash -z \
-  0x1000 bootloader.bin 0x8000 partition-table.bin 0xe000 boot_app0.bin 0x10000 alphapi-walkie.bin
-```
+布局统一为 Arduino 默认 OTA 布局（`app0@0x10000`）：app 写 `0x10000`，`bootloader.bin` 写 `0x1000`（Zero 写 `0x0`），`partition-table.bin` 写 `0x8000`，`boot_app0.bin` 写 `0xe000`。
 
 ## 仓库结构
 
 ```
-alphapi-walkie/
-├── platformio.ini    # 板型 / 框架 / 依赖
-├── src/
-│   ├── main.cpp      # 主程序
-│   └── device/       # 设备专用：面板定义、配置、中文字库
-├── core/             # 共享协议/功控/加密/音频等头文件（One S 与 Zero / One S3 复用）
-└── dist/             # 打包好的刷机页（esp-web-tools）与分段固件
+core/                   ← 三端共享：协议 / 加密 / 功控 / 音频 / NVS / 字体
+one-s/                  ← AlphaPi One S（ESP32-S2, ST7735, 四键）
+  platformio.ini
+  src/main.cpp
+  src/device/           设备专用：面板定义、配置、开机界面
+zero/                   ← AlphaPi Zero（ESP32-C3, 5×5 点阵, 三键）
+one-s3/                 ← AlphaPi One S3（ESP32-S3, ST7789, 四键）
+dist/                   ← 各板刷机页 + 分段固件（bin 构建产物不入库）
 ```
-
-## 功能速览
-
-- PTT 单向半双工语音，对讲范围内直连通信
-- 邻居发现 + 信道占用图 + 当前信道高亮
-- 三档功率闭环控制 + 信号强度指示
-- 丢帧补偿 + 欠载补帧保护
-- AES 加密的通话
 
 ## 许可
 

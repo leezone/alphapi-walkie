@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlphaPi Walkie One S — Web 刷机</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background: #1a1d23; color: #e6e6e6;
+         max-width: 640px; margin: 40px auto; padding: 0 20px; line-height: 1.7; }
+  h1 { color: #4dd0e1; font-size: 1.5em; }
+  .by { color: #888; font-size: .85em; margin-top: -12px; }
+  .card { background: #242830; border-radius: 10px; padding: 20px; margin: 20px 0; }
+  code { background: #0d1117; padding: 2px 6px; border-radius: 4px; color: #7ee787; font-size: .9em; }
+  pre { background: #0d1117; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: .85em; }
+  .warn { color: #f0a040; }
+  esp-web-install-button { --esp-tools-button-color: #4dd0e1; --esp-tools-button-text-color: #1a1d23; }
+  table { border-collapse: collapse; width: 100%; font-size: .9em; }
+  td, th { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+</style>
+</head>
+<body>
+<h1>AlphaPi Walkie One S</h1>
+<p class="by">by leezone · ESP32-S2 (AlphaPi One S) · ESP-NOW 对讲机 · GB2312 中文</p>
+
+<div class="card">
+  <h3>① 一键刷机（Chrome / Edge，需 HTTPS 或 localhost）</h3>
+  <p>USB 连接 One S，点击下方按钮，选择串口即可。布局与厂商一致：</p>
+  <table>
+    <tr><th>偏移</th><th>内容</th></tr>
+    <tr><td><code>0x1000</code></td><td>Arduino 二级 bootloader（DIO 80m）</td></tr>
+    <tr><td><code>0x8000</code></td><td>Arduino 默认分区表（app0@0x10000）</td></tr>
+    <tr><td><code>0xe000</code></td><td>otadata（factory → app0）</td></tr>
+    <tr><td><code>0x10000</code></td><td>对讲机 app</td></tr>
+  </table>
+  <br>
+  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+  <p class="warn">注意：首次从厂商布局切到 Arduino 布局时，<br>
+  需先清旧 otadata：<code>erase-region 0xd000 0x2000</code>（不要动 0x9000 的 NVS）；<br>
+  或先整体 <code>erase-flash</code> 再刷四段（名字/信道/音量设置会丢失）。</p>
+</div>
+
+<div class="card">
+  <h3>② 命令行分段刷（推荐，USB bridge 偶发掉线可重试）</h3>
+  <pre>python3 tools/alphapi-flash/flash-retry.py bootloader.bin 0x1000
+python3 tools/alphapi-flash/flash-retry.py partition-table.bin 0x8000
+python3 tools/alphapi-flash/flash-retry.py boot_app0.bin 0xe000
+python3 tools/alphapi-flash/flash-retry.py walkie-one-s.bin 0x10000</pre>
+  <p>已刷过本布局的板子只需最后一条（app 到 0x10000）。</p>
+</div>
+
+<div class="card">
+  <h3>③ 整片镜像（8MB，从 0x0 一次写入，会清 NVS）</h3>
+  <pre>python3 tools/alphapi-flash/alphapi-flash.py esptool --before no-reset \
+  --after no-reset --baud 115200 write-flash -z 0x0 walkie-one-s-full.bin</pre>
+  <p class="warn">整片写入会擦除 NVS（名字/信道/音量设置丢失），仅在布局混乱时用。</p>
+</div>
+
+<div class="card">
+  <h3>使用说明</h3>
+  <ul>
+    <li><b>A</b> 说（PTT）· 频道页/密码页边沿按键</li>
+    <li><b>B</b> 配对页：看邻居 + 信道占用图，C/D 换信道（两台须同信道）；B 短按删位/长按清空</li>
+    <li><b>C / D</b> 音量 − / +（0..9）；密码页 C=位0 D=位1、A=保存、B=清空</li>
+    <li>上线提示音：马里奥金币；功率三档闭环自动调节（信号条显示档位）</li>
+  </ul>
+</div>
+</body>
+</html>
