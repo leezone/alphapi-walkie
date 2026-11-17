@@ -4,7 +4,7 @@ AlphaPi 系列小板的对讲机固件：按住说话、松开发送，局域网
 
 - **AlphaPi One S**（`one-s/`，ESP32-S2，ST7735 160×128，四键）
 - **AlphaPi Zero**（`zero/`，ESP32-C3，5×5 LED 点阵，三键）
-- **AlphaPi One S3**（`one-s3/`，ESP32-S3，ST7789 160×128，四键）
+- **AlphaPi One**（`one-s3/`，ESP32-S3，ST7789 160×128，四键）
 
 三端共用 `core/` 里的协议、加密、功控、音频实现；设备差异（面板、按键、协处理器波特率、字体等）均在各自的 `src/device/` 下。
 
@@ -18,13 +18,13 @@ AlphaPi 系列小板的对讲机固件：按住说话、松开发送，局域网
 - **闭环功率控制**：根据对端丢包率与接收信号自动调节发射功率三档（8.5 / 13 / 17 dBm），屏幕信号条实时显示当前档位。
 - **接收丢帧补偿**：收到的语音攒够水位再起播，卡顿时用前一帧衰减补帧，不把欠载放大成空洞。
 - **AES-128-CTR 加密**：按密码派生密钥（SHA-256），密码以位串输入，空=不加密。
-- **全中文界面**（One S / One S3）：GB2312 一级字库 3756 字，HZK16。
+- **全中文界面**（One S / AlphaPi One）：GB2312 一级字库 3756 字，HZK16。
 - **5×5 点阵显示**（Zero）：形状+MAC 尾号滚动、信道号/密码视图/音量档，加密时锁字形排在机器名前。
 - **上线提示音**：马里奥金币音。
 
 ## 按键
 
-### One S / One S3（四键 A/B/C/D）
+### One S / AlphaPi One（四键 A/B/C/D）
 
 | 页面 | 键位 | 作用 |
 |---|---|---|
@@ -57,7 +57,7 @@ AlphaPi 系列小板的对讲机固件：按住说话、松开发送，局域网
 # 依赖：PlatformIO Core（首次会下载工具链 ~200MB）
 cd one-s && pio run          # One S
 cd zero   && pio run          # Zero
-cd one-s3 && pio run          # One S3
+cd one-s3 && pio run          # AlphaPi One
 ```
 
 产物：`one-s/.pio/build/lolin_s2_mini/firmware.bin`（对应板型目录下的 `.pio/build/...`）
@@ -69,7 +69,7 @@ cd one-s3 && pio run          # One S3
 ```
 dist/walkie-one-s/index.html    One S 刷机页（按页面上的说明刷）
 dist/walkie-zero/index.html     Zero 刷机页
-dist/walkie-one-s3/index.html   One S3 刷机页
+dist/walkie-one-s3/index.html   AlphaPi One 刷机页
 ```
 
 布局统一为 Arduino 默认 OTA 布局（`app0@0x10000`）：app 写 `0x10000`，`bootloader.bin` 写 `0x1000`（Zero 写 `0x0`），`partition-table.bin` 写 `0x8000`，`boot_app0.bin` 写 `0xe000`。
@@ -83,7 +83,7 @@ one-s/                  ← AlphaPi One S（ESP32-S2, ST7735, 四键）
   src/main.cpp
   src/device/           设备专用：面板定义、配置、开机界面
 zero/                   ← AlphaPi Zero（ESP32-C3, 5×5 点阵, 三键）
-one-s3/                 ← AlphaPi One S3（ESP32-S3, ST7789, 四键）
+one-s3/                 ← AlphaPi One（ESP32-S3, ST7789, 四键）
 dist/                   ← 各板刷机页 + 分段固件（bin 构建产物不入库）
 ```
 
