@@ -2,7 +2,7 @@
 // 从 One S 版 alphapi-walkie 移植：协控 0x90 帧协议同源（STEM-Radio 已验证）
 // 音频：8bit@24k 播放（协控固定消耗速率，WAV 头不读）；麦克风 0x80/0x11 读帧
 // 按键：A=GPIO10 B=GPIO1 C=GPIO3，PULL_DOWN 按下=HIGH
-// 组合键：A按住=PTT；A+B/C=音量；B+A/C=频道；C+A/B=密码位；C+A/B≥10s=清密码
+// 组合键：A按住=PTT；A+B/C=音量；B+A/C=频道；C+A/B=密码位（A=0 B=1）；C+A/B≥10s=清密码
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -684,7 +684,7 @@ static void enterTransmit()
 // A 按住 = PTT
 // A 按住 + B = 音量-，A 按住 + C = 音量+
 // B 按住 + A = 频道-，B 按住 + C = 频道+
-// C 按住 + A = 密码位 1，C 按住 + B = 密码位 0（抬手立即生效）
+// C 按住 + A = 密码位 0，C 按住 + B = 密码位 1（按手一次只记一个）；C 单按 = 密码视图
 // C 按住 + A 或 B ≥ 10s = 清空密码
 static uint32_t g_aHeldMs = 0, g_bHeldMs = 0, g_cHeldMs = 0;
 static bool g_aWas = false, g_bWas = false, g_cWas = false;
@@ -703,6 +703,8 @@ static void handleKeys(uint32_t now)
     bool a = digitalRead(KEY_A) == HIGH;
     bool b = digitalRead(KEY_B) == HIGH;
     bool c = digitalRead(KEY_C) == HIGH;
+    // 全局边沿：松→按 = 一次点击
+    bool eA = a && !g_aWas, eB = b && !g_bWas, eC = c && !g_cWas;
 
     // 记录按住起始时间
     if (a && !g_aWas) g_aHeldMs = now;
@@ -731,9 +733,9 @@ static void handleKeys(uint32_t now)
             mtxSendFast(MTX_X);
             Serial.println("[KEY] 密码已清空（C+A/B ≥10s）");
         }
-        if (!g_comboClearDone && now - g_lastComboAction > 200 && now - g_cHeldMs > 150)
+        if (!g_comboClearDone && now - g_cHeldMs > 150)
         {
-            if (a && g_passLen < 16)
+            if (eA && g_passLen < 16)
             {
                 g_passBits = (g_passBits << 1) | 0;
                 g_passLen++;
@@ -742,7 +744,7 @@ static void handleKeys(uint32_t now)
                 savePass();
                 Serial.printf("[KEY] 密码位 0（len=%u）\n", g_passLen);
             }
-            else if (b && g_passLen < 16)
+            else if (eB && g_passLen < 16)
             {
                 g_passBits = (g_passBits << 1) | 1;
                 g_passLen++;
@@ -760,9 +762,9 @@ static void handleKeys(uint32_t now)
     }
 
     // ===== 模式 B（信道）：A=信道- C=信道+；B 单按显示信道号 =====
-    if (mode == 2 && now - g_lastComboAction > 300 && now - g_bHeldMs > 120)
+    if (mode == 2 && now - g_bHeldMs > 120)
     {
-        if (a)
+        if (eA)
         {
             applyChannel(gChannel <= 1 ? 13 : gChannel - 1);
             g_chDisplayUntil = now + 1200;
@@ -770,7 +772,7 @@ static void handleKeys(uint32_t now)
             mtxShowChannel(gChannel);
             Serial.printf("[KEY] 信道- -> %u\n", gChannel);
         }
-        else if (c)
+        else if (eC)
         {
             applyChannel(gChannel >= 13 ? 1 : gChannel + 1);
             g_chDisplayUntil = now + 1200;
@@ -797,10 +799,10 @@ static void handleKeys(uint32_t now)
         else
         {
             if (g_mode == Mode::Transmit) enterHome();   // 组合键优先于 PTT
-            if (now - g_lastComboAction > 250 && now - g_aHeldMs > 150)
+            if (now - g_aHeldMs > 150)
             {
-                if (b && gVolume > 0) { gVolume--; saveVolume(); g_volDisplayUntil = now + 1200; g_lastComboAction = now; mtxSendFast(MTX_ARR_D); }
-                if (c && gVolume < 9) { gVolume++; saveVolume(); g_volDisplayUntil = now + 1200; g_lastComboAction = now; mtxSendFast(MTX_ARR_U); }
+                if (eB && gVolume > 0) { gVolume--; saveVolume(); g_volDisplayUntil = now + 1200; g_lastComboAction = now; mtxSendFast(MTX_ARR_D); }
+                if (eC && gVolume < 9) { gVolume++; saveVolume(); g_volDisplayUntil = now + 1200; g_lastComboAction = now; mtxSendFast(MTX_ARR_U); }
             }
         }
     }
