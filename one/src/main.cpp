@@ -153,14 +153,13 @@ static void initIdentity()
     if (!invalid && n.endsWith("00")) invalid = true;   // 旧bug生成的坏名，自愈重新生成
     if (invalid)
     {
+        // 生肖一个字 + MAC 尾两位：不出现"猪狗""狗鸡"这类歧义组合
         const char *zodiac[12] = {"鼠","牛","虎","兔","龙","蛇","马","羊","猴","鸡","狗","猪"};
         uint32_t seed = esp_random();
         int a = seed % 12;
-        int b = (seed >> 8) % 12;
-        if (b == a) b = (b + 1) % 12;
         uint8_t mac[6] = {0};
         esp_read_mac(mac, ESP_MAC_WIFI_STA);   // efuse 直读，无需 WiFi 启动
-        snprintf(gMyName, sizeof(gMyName), "%s%s%02X", zodiac[a], zodiac[b], mac[5]);
+        snprintf(gMyName, sizeof(gMyName), "%s%02X%02X", zodiac[a], mac[4], mac[5]);
         walkie::saveName(String(gMyName));
     }
     else

@@ -43,14 +43,14 @@
   <h3>② 命令行分段刷（推荐，USB bridge 偶发掉线可重试）</h3>
   <pre>python3 -m esptool --port /dev/ttyACM0 --before default_reset \
   --after hard_reset --chip esp32s3 write_flash -z 0x0 \
-  bootloader.bin 0x8000 partition-table.bin 0x10000 walkie-one-s3.bin</pre>
+  bootloader.bin 0x8000 partition-table.bin 0x10000 walkie-one.bin</pre>
   <p>Arduino S3 直接用标准 esptool 即可。首次切换建议先全擦（<code>erase_flash</code>）。</p>
 </div>
 
 <div class="card">
   <h3>③ 整片镜像（8MB，从 0x0 一次写入，会清 NVS）</h3>
   <pre>python3 -m esptool --port /dev/ttyACM0 --before default_reset \
-  --after hard_reset --chip esp32s3 write_flash -z 0x0 walkie-one-s3-full.bin</pre>
+  --after hard_reset --chip esp32s3 write_flash -z 0x0 walkie-one-full.bin</pre>
   <p class="warn">整片写入会擦除 NVS（名字/信道/音量设置丢失），仅在布局混乱时用。</p>
 </div>
 

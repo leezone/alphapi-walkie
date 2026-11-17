@@ -4,7 +4,7 @@ AlphaPi 系列小板的对讲机固件：按住说话、松开发送，局域网
 
 - **AlphaPi One S**（`one-s/`，ESP32-S2，ST7735 160×128，四键）
 - **AlphaPi Zero**（`zero/`，ESP32-C3，5×5 LED 点阵，三键）
-- **AlphaPi One**（`one-s3/`，ESP32-S3，ST7789 160×128，四键）
+- **AlphaPi One**（`one/`，ESP32-S3，ST7789 160×128，四键）
 
 三端共用 `core/` 里的协议、加密、功控、音频实现；设备差异（面板、按键、协处理器波特率、字体等）均在各自的 `src/device/` 下。
 
@@ -57,7 +57,7 @@ AlphaPi 系列小板的对讲机固件：按住说话、松开发送，局域网
 # 依赖：PlatformIO Core（首次会下载工具链 ~200MB）
 cd one-s && pio run          # One S
 cd zero   && pio run          # Zero
-cd one-s3 && pio run          # AlphaPi One
+cd one && pio run          # AlphaPi One
 ```
 
 产物：`one-s/.pio/build/lolin_s2_mini/firmware.bin`（对应板型目录下的 `.pio/build/...`）
@@ -69,7 +69,7 @@ cd one-s3 && pio run          # AlphaPi One
 ```
 dist/walkie-one-s/index.html    One S 刷机页（按页面上的说明刷）
 dist/walkie-zero/index.html     Zero 刷机页
-dist/walkie-one-s3/index.html   AlphaPi One 刷机页
+dist/walkie-one/index.html   AlphaPi One 刷机页
 ```
 
 布局统一为 Arduino 默认 OTA 布局（`app0@0x10000`）：app 写 `0x10000`，`bootloader.bin` 写 `0x1000`（Zero 写 `0x0`），`partition-table.bin` 写 `0x8000`，`boot_app0.bin` 写 `0xe000`。
@@ -77,14 +77,14 @@ dist/walkie-one-s3/index.html   AlphaPi One 刷机页
 ## 仓库结构
 
 ```
-core/                   ← 三端共享：协议 / 加密 / 功控 / 音频 / NVS / 字体
-one-s/                  ← AlphaPi One S（ESP32-S2, ST7735, 四键）
+core/            三端共享：协议 / 加密 / 功控 / 音频 / NVS / 字体
+one-s/           AlphaPi One S（ESP32-S2, ST7735, 四键）
   platformio.ini
   src/main.cpp
-  src/device/           设备专用：面板定义、配置、开机界面
-zero/                   ← AlphaPi Zero（ESP32-C3, 5×5 点阵, 三键）
-one-s3/                 ← AlphaPi One（ESP32-S3, ST7789, 四键）
-dist/                   ← 各板刷机页 + 分段固件（bin 构建产物不入库）
+  src/device/    设备专用：面板定义、配置、开机界面
+zero/            AlphaPi Zero（ESP32-C3, 5×5 点阵, 三键）
+one/             AlphaPi One（ESP32-S3, ST7789, 四键）
+dist/            各板刷机页 + 分段固件（bin 构建产物不入库）
 ```
 
 ## 许可
