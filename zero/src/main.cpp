@@ -25,6 +25,7 @@
 #include "core/walkie_atomic.h"
 #include "core/walkie_codec.h"
 #include "core/walkie_store.h"
+#include "walkie_n32.h"
 #include "core/walkie_chime.h"
 #include "core/walkie_audio.h"
 #include "core/walkie_radio.h"
@@ -35,158 +36,19 @@
 static HardwareSerial coUart(1);
 
 static SemaphoreHandle_t g_uartMux = nullptr;
-struct UartLock {
-    UartLock()  { if (g_uartMux) xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY); }
-    ~UartLock() { if (g_uartMux) xSemaphoreGiveRecursive(g_uartMux); }
-};
-static uint8_t txBuf[260];
+static walkie::N32Driver g_n32{coUart};
+static walkie::Atomic<uint16_t> g_micHeal{0}; // 发送端麦克风自愈次数
+static walkie::Atomic<uint8_t> g_txPeak{0};   // 麦克风采集到的峰值（0..127）
+static walkie::Atomic<uint8_t> g_rxPeak{0};   // 送去播放的峰值（0..127）
 
-static void uartFlushIn()
-{
-    while (coUart.available() > 0) coUart.read();
-}
-
-// 写寄存器：0x90 <reg> <len> <payload...> <checksum> -> 应答 0x91 <reg> <accepted>
-static bool codecWriteReg(uint8_t reg, const uint8_t *payload, size_t len,
-                          uint8_t *accepted, uint16_t timeoutMs)
-{
-    UartLock lock;
-    size_t frameLen = walkie::buildWriteFrame(txBuf, sizeof(txBuf), reg, payload, len);
-    if (frameLen == 0) return false;
-    uartFlushIn();
-    coUart.write(txBuf, frameLen);
-
-    uint8_t ack[3] = {0};
-    coUart.setTimeout(timeoutMs);
-    if (coUart.readBytes(ack, 3) != 3) return false;
-    walkie::AckFrame a = walkie::parseAck(ack, 3);
-    if (!a.valid || a.reg != reg) return false;
-    if (accepted) *accepted = a.value;
-    return true;
-}
-
-static bool codecControl(uint8_t payload)
-{
-    return codecWriteReg(walkie::REG_CTRL, &payload, 1, nullptr, 400);
-}
-
-static bool codecSetVolume(uint8_t vol)
-{
-    if (vol > 6) vol = 6;
-    return codecWriteReg(walkie::REG_VOLUME, &vol, 1, nullptr, 400);
-}
-
-// ========== 播放链路（STEM-Radio 验证序列：0x14音量 → 0x10/00 → WAV头 → PCM） ==========
-static bool g_playReady = false;
-static uint32_t g_lastPlayMs = 0;
-static walkie::Atomic<uint16_t> g_playRestart{0};
-static walkie::Atomic<uint32_t> g_playOk{0};
-static walkie::Atomic<uint32_t> g_playErr{0};
-static walkie::Atomic<uint16_t> g_underrun{0};
-
-static bool codecPlaybackStart()
-{
-    // Zero 不需要 0x0f 总线初始化（STEM-Radio 无此命令）
-    uint8_t stop = 0;
-    codecWriteReg(walkie::REG_CTRL, &stop, 1, nullptr, 400);   // 停录/播放启动
-    uint8_t hwvol = 6;                                 // 硬件音量拉满，音量走软件
-    codecWriteReg(walkie::REG_VOLUME, &hwvol, 1, nullptr, 400);
-
-    const uint8_t wav[44] = {
-        'R','I','F','F', 0xFF,0xFF,0xFF,0xFF,
-        'W','A','V','E','f','m','t',' ',
-        0x10,0x00,0x00,0x00,
-        0x01,0x00, 0x01,0x00,
-        (uint8_t)CO_RATE,(uint8_t)(CO_RATE>>8),(uint8_t)(CO_RATE>>16),(uint8_t)(CO_RATE>>24),
-        (uint8_t)CO_RATE,(uint8_t)(CO_RATE>>8),(uint8_t)(CO_RATE>>16),(uint8_t)(CO_RATE>>24),
-        0x01,0x00, 0x08,0x00,
-        'd','a','t','a', 0xFF,0xFF,0xFF,0xFF,
-    };
-    bool ok = false;
-    for (int attempt = 0; attempt < 3 && !ok; attempt++)
-    {
-        ok = codecWriteReg(walkie::REG_PLAY, wav, sizeof(wav), nullptr, 400);
-        if (!ok) { uartFlushIn(); delay(30); }
-    }
-    if (!ok) return false;
-    g_playReady = true;
-    g_lastPlayMs = millis();
-    g_playRestart++;
-    return true;
-}
-
-static bool codecPlayPCM(const uint8_t *data, size_t len)
-{
-    UartLock lock;
-    if (len == 0) return false;
-    if (g_playReady && millis() - g_lastPlayMs > 800) g_playReady = false;
-    if (!g_playReady && !codecPlaybackStart()) return false;
-
-    size_t sent = 0;
-    int stalled = 0;
-    while (sent < len)
-    {
-        size_t n = len - sent;
-        if (n > 160) n = 160;   // Zero 协控一帧吸收 128~192B，160 安全
-        uint8_t accepted = 0;
-        if (!codecWriteReg(walkie::REG_PLAY, data + sent, n, &accepted, 400))
-        {
-            g_playReady = false;
-            g_playErr++;
-            return false;
-        }
-        if (accepted == 0)
-        {
-            if (++stalled > 20) { g_playReady = false; return false; }
-            xSemaphoreGiveRecursive(g_uartMux);
-            vTaskDelay(pdMS_TO_TICKS(5));
-            xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY);
-            continue;
-        }
-        if (accepted > n) accepted = (uint8_t)n;
-        sent += accepted;
-        stalled = 0;
-        g_playOk++;
-        g_lastPlayMs = millis();
-        xSemaphoreGiveRecursive(g_uartMux);
-        taskYIELD();
-        xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY);
-    }
-    return true;
-}
+static bool codecPlayPCM(const uint8_t *data, size_t len) { return walkie::n32PlayPCM(g_n32, data, len); }
+static size_t codecReadMicFrame(uint8_t *buf, size_t bufSize) { return walkie::n32ReadMicFrame(g_n32, buf, bufSize); }
 
 // ========== 麦克风（运行时探测：One S 用 0x80/0x11，Zero 可能用 0x80/0x10） ==========
-static uint8_t g_micReadReg = 0x11;   // 探测后确定：0x11 或 0x10
-static uint8_t g_micStartPayload = 0x01; // 探测后确定：0x01 或 0x02
 static bool g_micProbed = false;
-static walkie::Atomic<uint16_t> g_micHeal{0};
-static walkie::Atomic<uint8_t> g_txPeak{0};
-static walkie::Atomic<uint8_t> g_rxPeak{0};
 
-static bool codecStartMic() { g_playReady = false; return codecControl(g_micStartPayload); }
-static bool codecStopMic()  { g_playReady = false; return codecControl(0x00); }
-
-static size_t codecReadMicFrame(uint8_t *buf, size_t bufSize)
-{
-    UartLock lock;
-    uartFlushIn();
-    txBuf[0] = 0x80; txBuf[1] = g_micReadReg; txBuf[2] = 160;
-    coUart.write(txBuf, 3);
-
-    uint8_t head[3] = {0};
-    coUart.setTimeout(15);
-    if (coUart.readBytes(head, 3) != 3) return 0;
-    if (head[0] != 0x81 || head[1] != g_micReadReg) return 0;
-
-    uint8_t plen = head[2];
-    if (plen == 0 || plen > bufSize) return 0;
-    if (coUart.readBytes(buf, plen + 1) != (size_t)(plen + 1)) return 0;
-
-    uint8_t sum = head[0] + head[1] + head[2];
-    for (size_t i = 0; i < plen; i++) sum += buf[i];
-    if (sum != buf[plen]) return 0;
-    return plen;
-}
+static bool codecStartMic() { g_n32.playReady = false; return walkie::n32Control(g_n32, g_n32.micStart); }
+static bool codecStopMic()  { g_n32.playReady = false; return walkie::n32Control(g_n32, 0x00); }
 
 // 开机探测麦克风协议：先试 One S 的 0x11/0x01，再试 Zero 手册的 0x10/0x02
 static void probeMicProtocol()
@@ -199,9 +61,9 @@ static void probeMicProtocol()
     };
     for (auto &c : candidates)
     {
-        g_micReadReg = c.reg;
-        g_micStartPayload = c.start;
-        codecControl(0x00);  // 先停
+        g_n32.micReg = c.reg;
+        g_n32.micStart = c.start;
+        walkie::n32Control(g_n32, 0x00);  // 先停
         delay(50);
         if (!codecStartMic()) continue;
         delay(100);
@@ -219,22 +81,26 @@ static void probeMicProtocol()
         delay(50);
     }
     // 全部失败：默认用 One S 组合，运行时自愈
-    g_micReadReg = 0x11;
-    g_micStartPayload = 0x01;
+    g_n32.micReg = 0x11;
+    g_n32.micStart = 0x01;
     Serial.println("[MIC] 探测失败，默认 reg=0x11 start=0x01（运行时自愈）");
 }
 
 static void codecInit()
 {
-    if (!g_uartMux) g_uartMux = xSemaphoreCreateRecursiveMutex();
+    if (!g_uartMux)
+    {
+        g_uartMux = xSemaphoreCreateRecursiveMutex();
+        g_n32.mux = g_uartMux;
+    }
     coUart.setRxBufferSize(2048);
     coUart.begin(CO_BAUD, SERIAL_8N1, CO_RX, CO_TX);
     delay(HT_BOOT_DELAY_MS);   // HT 协控上电自举
-    uartFlushIn();
+    walkie::n32FlushIn(g_n32);
     coUart.setTimeout(400);
-    codecControl(0x00);   // 停麦
-    codecSetVolume(6);
-    uartFlushIn();
+    walkie::n32Control(g_n32, 0x00);  // 停麦
+    walkie::n32SetVolume(g_n32, 6);   // 硬件音量拉满，音量走软件
+    walkie::n32FlushIn(g_n32);
 }
 
 // ========== 5×5 点阵 UI ==========
@@ -255,30 +121,32 @@ static void mtxBuild(const uint8_t p[25], uint8_t f[9])
 
 static void mtxSendFast(const uint8_t p[25])
 {
-    UartLock lock;
+    g_n32.lock();
     uint8_t f[9];
     mtxBuild(p, f);
     coUart.write(f, 9);
+    g_n32.unlock();
 }
 
 static bool mtxSend(const uint8_t p[25])
 {
-    UartLock lock;
+    g_n32.lock();
     uint8_t f[9];
     mtxBuild(p, f);
     for (int att = 0; att < 3; att++)
     {
-        uartFlushIn();
+        walkie::n32FlushIn(g_n32);
         coUart.write(f, 9);
         uint8_t resp[3] = {0};
         coUart.setTimeout(150);
         if (coUart.readBytes(resp, 3) == 3)
         {
             walkie::AckFrame a = walkie::parseAck(resp, 3);
-            if (a.valid && a.reg == MTX_ADDR) return true;
+            if (a.valid && a.reg == MTX_ADDR) { g_n32.unlock(); return true; }
         }
         delay(50);
     }
+    g_n32.unlock();
     return false;
 }
 
@@ -482,7 +350,7 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
             g_rxTracker.onVoicePacket(seq, now, walkie::VOICE_GAP_RESET_MS, walkie::VOICE_STALL_MIN_MS,
                                       walkie::VOICE_STALL_MAX_MS);
         if (ev.newSession)
-        { g_seqGap = 0; g_rxStall = 0; g_underrun = 0; g_playRestart = 0; }
+        { g_seqGap = 0; g_rxStall = 0; g_n32.underrun = 0; g_n32.playRestart = 0; }
         if (ev.gap)
         { g_seqGap += ev.gap; walkie::lossWindowAdd(g_lossWin, 0, ev.gap); }
         walkie::lossWindowAdd(g_lossWin, 1, 0);
@@ -543,7 +411,7 @@ static void rxPlayTask(void *)
         }
         if (avail < walkie::kSamplesPerFrame)
         {
-            if (gapFrames == 0) g_underrun++;
+            if (gapFrames == 0) g_n32.underrun++;
             if (++gapFrames > 50) { primed = false; vTaskDelay(pdMS_TO_TICKS(5)); continue; }
             uint8_t fill[walkie::kBytesPerFrame];
             size_t fillLen = walkie::gapFrame(g_upPrev, gVolume, fill, sizeof(fill));
@@ -631,7 +499,7 @@ static void initEspNow()
     esp_wifi_set_ps(WIFI_PS_NONE);
     g_radio.init(gChannel, walkie::kPwrDbm[g_pwrLvl], onDataRecv);
     delay(150);
-    codecSetVolume(6);
+    walkie::n32SetVolume(g_n32, 6);
 }
 
 static void sendBeacon()

@@ -26,6 +26,7 @@
 #include "core/walkie_store.h"
 #include "core/walkie_audio.h"
 #include "core/walkie_chime.h"
+#include "core/walkie_n32.h"
 #include "core/walkie_radio.h"
 
 alphapi::LGFX_AlphaPi display;
@@ -208,240 +209,56 @@ static void prunePeers(uint32_t now)
     if (walkie::prunePeers(gPeers, walkie::kMaxPeers, now, walkie::PEER_TIMEOUT_MS)) gPeersDirty = true;
 }
 
-// ========== N32 Codec 协议 ==========
-
-static walkie::Atomic<bool> g_n32Inited{false}; // 0x0f 外设总线初始化是否成功
+// ========== N32 协处理器驱动（walkie::N32Driver，core/walkie_n32.h）==========
 static SemaphoreHandle_t g_uartMux = nullptr;
-struct UartLock {
-    // 必须递归：codecPlayPCM 持锁后会调 codecPlaybackStart -> codecWriteReg 再取同一把锁
-    UartLock()  { if (g_uartMux) xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY); }
-    ~UartLock() { if (g_uartMux) xSemaphoreGiveRecursive(g_uartMux); }
-};
-static uint8_t txBuf[260];
-
-static bool codecSend(const uint8_t *frame, size_t len)
-{
-    return Serial1.write(frame, len) == len;
-}
-
-// N32 对命令应答是定长 3 字节，发命令前必须清空残留字节，否则 ACK 永远对不上
-static void uartFlushIn()
-{
-    while (Serial1.available() > 0) Serial1.read();
-}
-
-// 写寄存器：0x90 <reg> <len> <payload...> <checksum> -> 应答 0x91 <reg> <accepted>
-static bool codecWriteReg(uint8_t reg, const uint8_t *payload, size_t len,
-                          uint8_t *accepted, uint16_t timeoutMs)
-{
-    UartLock lock;
-    size_t frameLen = walkie::buildWriteFrame(txBuf, sizeof(txBuf), reg, payload, len);
-    if (frameLen == 0) return false;
-    uartFlushIn();
-    if (!codecSend(txBuf, frameLen)) return false;
-
-    uint8_t ack[3] = {0};
-    Serial1.setTimeout(timeoutMs);
-    if (Serial1.readBytes(ack, 3) != 3) return false;
-    walkie::AckFrame a = walkie::parseAck(ack, 3);
-    if (!a.valid || a.reg != reg) return false;
-    if (accepted) *accepted = a.value;
-    return true;
-}
-
-// 原厂 boot.py 必做：0x0f 初始化 N32 外设总线。不发这条，N32 命令照样 ACK，
-// 但 DAC/功放不出声。注意 WiFi 射频启动时的电源跌落会让 N32 复位丢失该状态，
-// 所以每次重建播放链路都要重发。
-static bool n32BusInit()
-{
-    uint8_t one = 1;
-    for (int attempt = 0; attempt < 3; attempt++)
-    {
-        uartFlushIn();
-        size_t frameLen = walkie::buildWriteFrame(txBuf, sizeof(txBuf), walkie::REG_BUS_INIT, &one, 1);
-        if (frameLen == 0) return false;
-        codecSend(txBuf, frameLen);
-        Serial1.setTimeout(200);
-        uint8_t rsp[1];
-        if (Serial1.readBytes(rsp, 1) >= 1) { g_n32Inited = true; return true; }
-        uartFlushIn();
-        delay(20);
-    }
-    return false;
-}
-
-static bool codecControl(uint8_t payload)
-{
-    return codecWriteReg(walkie::REG_CTRL, &payload, 1, nullptr, 400);
-}
-
-// N32 播放前必须收到 44 字节 WAV 头，声明 24000Hz / 8bit / mono（流式，长度 0xFFFFFFFF）
-static bool g_playReady = false;
-static uint32_t g_lastPlayMs = 0;
-static char g_i2cScan[24] = "I2C:?";     // I2C 扫描结果
-
-// 扫描 I2C 总线（功放 NS41508 手册标称 0x18，加速度计也在这条总线上）
-static void i2cScan()
-{
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQ_HZ);
-    char *p = g_i2cScan;
-    int n = snprintf(p, sizeof(g_i2cScan), "I2C:");
-    p += n;
-    for (uint8_t addr = 0x08; addr < 0x78; addr++)
-    {
-        Wire.beginTransmission(addr);
-        if (Wire.endTransmission() == 0)
-        {
-            int room = (int)sizeof(g_i2cScan) - (int)(p - g_i2cScan);
-            if (room > 4) p += snprintf(p, room, "%02X ", addr);
-        }
-    }
-    if (p == g_i2cScan + 4) snprintf(g_i2cScan, sizeof(g_i2cScan), "I2C:none");
-}
+static walkie::N32Driver g_n32{Serial1};
 static walkie::Atomic<uint32_t> g_playErr{0}; // 播放写失败次数
-static walkie::Atomic<uint16_t> g_underrun{0};
-static walkie::Atomic<uint16_t> g_playRestart{0};
-static walkie::Atomic<uint32_t> g_playOk{0};  // 播放写成功次数
-static walkie::Atomic<uint32_t> g_rxVoice{0}; // 收到的语音包数
-static walkie::Atomic<uint32_t> g_rxBeacon{0};// 收到的心跳包数
+static walkie::Atomic<uint16_t> g_rxVoice{0}; // 收到的语音包数
+static walkie::Atomic<uint16_t> g_rxBeacon{0}; // 收到的心跳包数
+
 static walkie::Atomic<uint8_t> g_txPeak{0};   // 麦克风采集到的峰值（0..127）
 static walkie::Atomic<uint8_t> g_rxPeak{0};   // 送去播放的峰值（0..127）
 static walkie::Atomic<uint16_t> g_micHeal{0}; // 发送端麦克风自愈次数
 static walkie::Atomic<uint16_t> g_rxOver{0};  // 接收环形缓冲溢出丢弃字节数
+static walkie::Atomic<uint16_t> g_txStarve{0};  // TX 读麦间隔>15ms 次数（采集被饿）
 
-static bool codecPlaybackStart()
+static bool codecPlayPCM(const uint8_t *data, size_t len) { return walkie::n32PlayPCM(g_n32, data, len); }
+static size_t codecReadMicFrame(uint8_t *buf, size_t bufSize) { return walkie::n32ReadMicFrame(g_n32, buf, bufSize); }
+static bool codecStartMic() { g_n32.playReady = false; return walkie::n32Control(g_n32, 0x01); }
+static bool codecStopMic()  { g_n32.playReady = false; return walkie::n32Control(g_n32, 0x00); }
+
+static bool g_i2cOk_dbg = false;   // I2C 上有没有设备（N32 与功放都响应）
+static void i2cScan()
 {
-    // WiFi 启动的电源跌落可能让 N32 复位丢掉外设总线初始化，每次重建都重发
-    n32BusInit();
-    uint8_t stop = 0;
-    codecWriteReg(0x10, &stop, 1, nullptr, 400);        // 半双工：先停录音
-    uint8_t hwvol = 6;                                   // 硬件音量拉满，音量走软件
-    codecWriteReg(0x14, &hwvol, 1, nullptr, 400);
-
-    constexpr uint32_t rate = 24000;
-    const uint8_t wav[44] = {
-        'R','I','F','F', 0xFF,0xFF,0xFF,0xFF,
-        'W','A','V','E','f','m','t',' ',
-        0x10,0x00,0x00,0x00,                            // fmt chunk size = 16
-        0x01,0x00,                                      // PCM
-        0x01,0x00,                                      // mono
-        (uint8_t)rate,(uint8_t)(rate>>8),(uint8_t)(rate>>16),(uint8_t)(rate>>24),
-        (uint8_t)rate,(uint8_t)(rate>>8),(uint8_t)(rate>>16),(uint8_t)(rate>>24),
-        0x01,0x00,                                      // block align = 1
-        0x08,0x00,                                      // 8 bits per sample
-        'd','a','t','a', 0xFF,0xFF,0xFF,0xFF,
-    };
-    // WAV 头是关键命令，失败重试（原厂注释：短超时会引发链路异常）
-    bool ok = false;
-    for (int attempt = 0; attempt < 3 && !ok; attempt++)
+    if (g_i2cOk_dbg) return;
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQ_HZ);
+    for (uint8_t addr = 0x08; addr < 0x78; addr++)
     {
-        ok = codecWriteReg(0x15, wav, sizeof(wav), nullptr, 400);
-        if (!ok) { uartFlushIn(); delay(30); }
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) g_i2cOk_dbg = true;
     }
-    if (!ok) return false;
-    g_playReady = true;
-    g_lastPlayMs = millis();
-    g_playRestart++;
-    return true;
-}
-
-static bool codecPlayPCM(const uint8_t *data, size_t len)
-{
-    UartLock lock;
-    if (len == 0) return false;
-    // 静音超过 800ms 后 N32 可能退出播放态，需要重发 WAV 头
-    if (g_playReady && millis() - g_lastPlayMs > 800) g_playReady = false;
-    if (!g_playReady && !codecPlaybackStart()) return false;
-
-    size_t sent = 0;
-    int stalled = 0;
-    while (sent < len)
-    {
-        size_t n = len - sent;
-        if (n > 200) n = 200;
-        uint8_t accepted = 0;
-        if (!codecWriteReg(0x15, data + sent, n, &accepted, 400))
-        {
-            g_playReady = false;
-            g_playErr++;
-            return false;
-        }
-        if (accepted == 0)
-        {
-            if (++stalled > 20) { g_playReady = false; return false; }
-            // 背压时让出 UART，否则 TX 侧读麦克风被饿死（厂商同样短等）
-            xSemaphoreGiveRecursive(g_uartMux);
-            vTaskDelay(pdMS_TO_TICKS(5));
-            xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY);
-            continue;
-        }
-        if (accepted > n) accepted = (uint8_t)n;
-        sent += accepted;
-        stalled = 0;
-        g_playOk++;
-        g_lastPlayMs = millis();
-        // 每块之间让出总线，给按键/UI/TX 机会（厂商做法）
-        xSemaphoreGiveRecursive(g_uartMux);
-        taskYIELD();
-        xSemaphoreTakeRecursive(g_uartMux, portMAX_DELAY);
-    }
-    return true;
-}
-
-
-
-static bool codecStartMic() { g_playReady = false; return codecControl(0x01); }
-static bool codecStopMic()   { g_playReady = false; return codecControl(0x00); }
-
-static bool codecSetVolume(uint8_t vol)
-{
-    if (vol > 6) vol = 6;
-    return codecWriteReg(walkie::REG_VOLUME, &vol, 1, nullptr, 400);
-}
-
-static size_t codecReadMicFrame(uint8_t *buf, size_t bufSize = 250)
-{
-    UartLock lock;
-    // 一次读 160 字节（6.7ms 音频），留足余量，否则 N32 麦克风 FIFO 会溢出后停摆
-    uartFlushIn();
-    txBuf[0] = 0x80; txBuf[1] = 0x11; txBuf[2] = 160;
-    if (!codecSend(txBuf, 3)) return 0;
-
-    uint8_t head[3] = {0};
-    Serial1.setTimeout(15);
-    if (Serial1.readBytes(head, 3) != 3) return 0;
-    if (head[0] != 0x81 || head[1] != 0x11) return 0;
-
-    uint8_t plen = head[2];
-    if (plen == 0 || plen > bufSize) return 0;
-
-    // 帧体读进调用者自己的缓冲：原来读进全局 rxBuf，与 codecWriteReg
-    // 的 ACK 解析（也写 rxBuf）跨任务竞态，校验和随机失败 → 读麦返 0 → 断流(S)
-    if (Serial1.readBytes(buf, plen + 1) != (size_t)(plen + 1)) return 0;
-
-    uint8_t sum = head[0] + head[1] + head[2];
-    for (size_t i = 0; i < plen; i++) sum += buf[i];
-    if (sum != buf[plen]) return 0;
-    return plen;
 }
 
 static void codecInit()
 {
-    if (!g_uartMux) g_uartMux = xSemaphoreCreateRecursiveMutex();
+    if (!g_uartMux)
+    {
+        g_uartMux = xSemaphoreCreateRecursiveMutex();
+        g_n32.mux = g_uartMux;
+    }
     Serial1.begin(AUDIO_BAUD, SERIAL_8N1, AUDIO_RX_PIN, AUDIO_TX_PIN);
     // N32 是独立 MCU，上电自举需要时间，否则首条命令必丢
     delay(N32_BOOT_DELAY_MS);
-    uartFlushIn();
+    walkie::n32FlushIn(g_n32);
     Serial1.setTimeout(400);
 
     // 原厂 boot.py 必做：0x0f 初始化 N32 协处理器（返回 1 字节才算成功），
     // 失败要等 20ms 重试一次。不发这条，N32 处在未初始化状态：命令能 ACK，
     // 但 DAC/功放不出声。
-
-    n32BusInit();
-    codecControl(0x00);  // 停麦
-    codecSetVolume(6);   // 硬件音量拉满，音量走软件
-    uartFlushIn();
+    g_n32.needsBusInit = true;
+    walkie::n32Control(g_n32, 0x00);  // 停麦
+    walkie::n32SetVolume(g_n32, 6);   // 硬件音量拉满，音量走软件
+    walkie::n32FlushIn(g_n32);
 }
 
 // ========== ESP-NOW ==========
@@ -459,7 +276,6 @@ static walkie::LossWindow g_lossWin;   // 2s 窗口丢包率
 static walkie::Atomic<uint8_t> g_lossPct{0};    // 最近窗口丢包率%（beacon 回传用）
 static walkie::Atomic<int8_t> g_peerRssi{0};    // 最近语音包 RSSI
 static walkie::Atomic<uint16_t> g_rxStall{0};   // 收包间隔>60ms 次数（发射侧断流）
-static walkie::Atomic<uint16_t> g_txStarve{0};  // TX 读麦间隔>15ms 次数（采集被饿）
 static walkie::Atomic<uint32_t> g_lastVoiceRxMs{0};  // 最近收到语音包时刻（beacon 快报用）
 static uint8_t rxAudioBuf[4096];
 static walkie::Atomic<size_t> rxWritePos{0};
@@ -481,7 +297,7 @@ static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int
         if (ev.newSession)
         {
             // 新一句开始：清零会话计数，读数只反映当前这句
-            g_seqGap = 0; g_rxStall = 0; g_underrun = 0; g_playRestart = 0;
+            g_seqGap = 0; g_rxStall = 0; g_n32.underrun = 0; g_n32.playRestart = 0;
         }
         if (ev.gap)
         {
@@ -558,7 +374,7 @@ static void rxPlayTask(void *)
             // 丢帧补偿（CardieTalkie 思路）：不停流、不重攒 250ms，
             // 喂"上一样本按 3/4 衰减"的补偿帧保活 N32 链路，
             // 数据一回来立即续播。原来欠载→重新预缓冲把断口放大成 250ms+重建。
-            if (gapFrames == 0) g_underrun++;   // 每次断供只计 1 次
+            if (gapFrames == 0) g_n32.underrun++;   // 每次断供只计 1 次
             if (++gapFrames > 50)               // 断供 >400ms 才回到完整预缓冲
             {
                 primed = false;
@@ -727,8 +543,9 @@ static void initEspNow()
     // WiFi 射频启动瞬间的电源跌落/干扰会让 N32 的音频前端失效，
     // 之后命令照样 ACK 但不出声。这里等电源稳定后重建一次链路。
     delay(150);
-    n32BusInit();
-    codecSetVolume(6);
+    // WiFi 启动的电源跌落可能让 N32 复位丢掉外设总线初始化状态，这里重发一次
+    walkie::n32Control(g_n32, 0x00);
+    walkie::n32SetVolume(g_n32, 6);
 }
 
 static void sendBeacon()
@@ -809,7 +626,7 @@ static void drawDiag()
              (unsigned)g_txStarve, (unsigned)g_radio.txFail.load(),
              (unsigned)g_radio.txNack.load(), (int)g_pwrLvl);
     snprintf(l2, sizeof(l2), "U%u R%u G%u S%u",
-             (unsigned)g_underrun, (unsigned)g_playRestart,
+             (unsigned)g_n32.underrun, (unsigned)g_n32.playRestart,
              (unsigned)g_seqGap, (unsigned)g_rxStall);
 
     if (g_mode == Mode::Transmit)
