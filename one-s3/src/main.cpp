@@ -824,7 +824,6 @@ static void keyTask(void *)
 // ========== UI / 模式 ==========
 
 static unsigned long lastButton = 0;
-static unsigned long lastNav = 0;
 static unsigned long pairingStart = 0;
 static unsigned long lastVolUpdate = 0;
 static unsigned long lastBeacon = 0;
@@ -1205,8 +1204,6 @@ void loop()
     prevKeys = keysNow;
     bool a = (keysNow & KEY_BIT_A) != 0;
     bool b = (keysNow & KEY_BIT_B) != 0;
-    bool c = (keysNow & KEY_BIT_R) != 0;   // R = 加/位1
-    bool d = (keysNow & KEY_BIT_L) != 0;   // L = 减/位0
 
     if (g_mode == Mode::Home)
     {
@@ -1220,17 +1217,15 @@ void loop()
             lastButton = now;
             enterPairing();
         }
-        else if (c && now - lastNav > 250)
+        else if (edgeDown & KEY_BIT_R)
         {
-            lastNav = now;
             if (gVolume < 9) gVolume++;
             saveVolume();
             gVolDisplayUntil = now + walkie::VOICE_RX_RECENT_MS;
             drawHomeStatus(now);
         }
-        else if (d && now - lastNav > 250)
+        else if (edgeDown & KEY_BIT_L)
         {
-            lastNav = now;
             if (gVolume > 0) gVolume--;
             saveVolume();
             gVolDisplayUntil = now + walkie::VOICE_RX_RECENT_MS;
