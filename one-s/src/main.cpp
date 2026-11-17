@@ -212,7 +212,6 @@ static void prunePeers(uint32_t now)
 // ========== N32 协处理器驱动（walkie::N32Driver，core/walkie_n32.h）==========
 static SemaphoreHandle_t g_uartMux = nullptr;
 static walkie::N32Driver g_n32{Serial1};
-static walkie::Atomic<uint32_t> g_playErr{0}; // 播放写失败次数
 static walkie::Atomic<uint16_t> g_rxVoice{0}; // 收到的语音包数
 static walkie::Atomic<uint16_t> g_rxBeacon{0}; // 收到的心跳包数
 

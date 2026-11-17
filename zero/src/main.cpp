@@ -45,7 +45,6 @@ static bool codecPlayPCM(const uint8_t *data, size_t len) { return walkie::n32Pl
 static size_t codecReadMicFrame(uint8_t *buf, size_t bufSize) { return walkie::n32ReadMicFrame(g_n32, buf, bufSize); }
 
 // ========== 麦克风（运行时探测：One S 用 0x80/0x11，Zero 可能用 0x80/0x10） ==========
-static bool g_micProbed = false;
 
 static bool codecStartMic() { g_n32.playReady = false; return walkie::n32Control(g_n32, g_n32.micStart); }
 static bool codecStopMic()  { g_n32.playReady = false; return walkie::n32Control(g_n32, 0x00); }
@@ -71,7 +70,6 @@ static void probeMicProtocol()
         size_t n = codecReadMicFrame(tmp, sizeof(tmp));
         if (n > 0)
         {
-            g_micProbed = true;
             Serial.printf("[MIC] 探测成功: reg=0x%02X start=0x%02X (%u bytes)\n",
                           c.reg, c.start, (unsigned)n);
             codecStopMic();
