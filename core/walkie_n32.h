@@ -19,7 +19,7 @@ struct N32Driver
 {
     HardwareSerial &uart;
     SemaphoreHandle_t mux = nullptr;   // recursive; if null, driver is unprotected
-    uint8_t txBuf[260];
+    uint8_t txBuf[260] = {};
 
     // state
     bool playReady = false;

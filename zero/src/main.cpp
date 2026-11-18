@@ -26,6 +26,7 @@
 #include "core/walkie_codec.h"
 #include "core/walkie_store.h"
 #include "core/walkie_n32.h"
+#include "core/walkie_rxpath.h"
 #include "core/walkie_chime.h"
 #include "core/walkie_audio.h"
 #include "core/walkie_radio.h"
@@ -108,7 +109,6 @@ walkie::Atomic<uint8_t> gVolume{6};   // 软件音量 0..9
 uint16_t g_passBits = 0;
 uint8_t g_passLen = 0;
 walkie::CryptoState g_crypto;
-static walkie::Atomic<uint16_t> g_rxBadKey{0};
 
 // 本机身份：USB 收音机方案同款十六进制尾号（各字符均为 0-9A-F）
 char g_myName[12] = "Zero";   // beacon 发给各机器显示
@@ -140,96 +140,18 @@ static void savePass()
 }
 static void saveVolume() { walkie::saveVolume(gVolume); }
 
-// ========== 邻居表 ==========
-static walkie::PeerEntry gPeers[walkie::kMaxPeers];
-static walkie::Atomic<bool> gPeersDirty{false};
-static walkie::Atomic<bool> gPeerJoined{false};
-
-static void peerTouch(const uint8_t *mac, const char *name, uint32_t now, bool isVoice)
-{
-    bool joined = walkie::peerTouch(gPeers, walkie::kMaxPeers, mac, name, now, isVoice,
-                                    walkie::PEER_TIMEOUT_MS, "Zero");
-    gPeersDirty = true;
-    if (joined) gPeerJoined = true;
-}
-int findTalker(uint32_t now)
-{
-    return walkie::findTalker(gPeers, walkie::kMaxPeers, now, walkie::TALK_TIMEOUT_MS);
-}
-static void prunePeers(uint32_t now)
-{
-    if (walkie::prunePeers(gPeers, walkie::kMaxPeers, now, walkie::PEER_TIMEOUT_MS)) gPeersDirty = true;
-}
+walkie::RxPath rxPath{"Zero"};   // ESP-NOW 收包路径共享状态（core/walkie_rxpath.h）
 
 // ========== ESP-NOW（与 One S 完全同源） ==========
 static uint8_t txSeq = 0;
 static uint8_t txVoiceSeq = 0;
 static walkie::Atomic<uint8_t> g_pwrLvl{1};
-static walkie::Atomic<uint8_t> g_fbLoss{0};
-static walkie::Atomic<int8_t> g_fbRssi{0};
-static walkie::Atomic<uint32_t> g_fbMs{0};
-static walkie::Atomic<uint32_t> g_lastVoiceRxMs{0};  // 最近收到语音包时刻（beacon 快报用）
 static walkie::Radio g_radio;
-static walkie::Atomic<uint16_t> g_seqGap{0};
-static walkie::LossWindow g_lossWin;
-static walkie::Atomic<uint8_t> g_lossPct{0};
-static walkie::Atomic<int8_t> g_peerRssi{0};
-static walkie::Atomic<uint16_t> g_rxStall{0};
 static walkie::Atomic<uint16_t> g_txStarve{0};
-static walkie::Atomic<uint32_t> g_rxVoice{0};
-static walkie::Atomic<uint32_t> g_rxBeacon{0};
-static walkie::Atomic<uint16_t> g_rxOver{0};
-static uint8_t rxAudioBuf[4096];
-static walkie::Atomic<size_t> rxWritePos{0};
-static walkie::Atomic<size_t> rxReadPos{0};
 
 static void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
-    if (!data || len < 4 || len > 250) return;
-    if (data[0] != walkie::kMagic) return;
-    uint32_t now = millis();
-
-    if (data[1] == walkie::PKT_VOICE)
-    {
-        static walkie::VoiceRxTracker g_rxTracker;
-        uint8_t seq = data[2];
-        walkie::VoiceRxTracker::Event ev =
-            g_rxTracker.onVoicePacket(seq, now, walkie::VOICE_GAP_RESET_MS, walkie::VOICE_STALL_MIN_MS,
-                                      walkie::VOICE_STALL_MAX_MS);
-        if (ev.newSession)
-        { g_seqGap = 0; g_rxStall = 0; g_n32.underrun = 0; g_n32.playRestart = 0; }
-        if (ev.gap)
-        { g_seqGap += ev.gap; walkie::lossWindowAdd(g_lossWin, 0, ev.gap); }
-        walkie::lossWindowAdd(g_lossWin, 1, 0);
-        if (ev.stalled) g_rxStall++;
-        g_lastVoiceRxMs = now;
-        g_rxVoice++;
-        g_peerRssi = info->rx_ctrl->rssi;
-        peerTouch(info->src_addr, nullptr, now, true);
-        uint8_t dec[250];
-        walkie::VoiceDecoded vd = walkie::decodeVoicePacket(g_crypto, dec, sizeof(dec), data, len, seq);
-        if (vd.badKey) { g_rxBadKey++; return; }
-        if (!vd.payload || vd.len <= 0) return;
-        for (int i = 0; i < vd.len; i++)
-        {
-            if (!walkie::ringPush(rxAudioBuf, sizeof(rxAudioBuf), rxWritePos, rxReadPos, vd.payload[i]))
-            { g_rxOver++; break; }
-        }
-    }
-    else if (data[1] == walkie::PKT_BEACON)
-    {
-        g_rxBeacon++;
-        walkie::BeaconFeedback fb = walkie::parseBeacon(data, len);
-        if (fb.valid)
-        {
-            char nm[12] = {0};
-            memcpy(nm, data + 3, fb.nameLen);
-            peerTouch(info->src_addr, nm, now, false);
-            g_fbLoss = fb.lossPct;
-            g_fbRssi = fb.rssi;
-            g_fbMs = now;
-        }
-    }
+    walkie::handleEspNowPacket(rxPath, g_crypto, g_n32, info, data, len, millis());
 }
 
 // ========== 模式 ==========
@@ -249,7 +171,7 @@ static void rxPlayTask(void *)
         if (!g_rxTaskRun || g_mode == Mode::Transmit)
         { primed = false; g_upPrev = -1; vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-        size_t avail = walkie::ringAvailable(rxWritePos, rxReadPos, sizeof(rxAudioBuf));
+        size_t avail = walkie::ringAvailable(rxPath.rxWritePos, rxPath.rxReadPos, sizeof(rxPath.audioBuf));
         if (!primed)
         {
             if (avail < kStartBytes) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
@@ -271,7 +193,7 @@ static void rxPlayTask(void *)
         while (i + walkie::kUpScale <= sizeof(chunk))
         {
             uint8_t b = 0;
-            if (!walkie::ringPop(rxAudioBuf, sizeof(rxAudioBuf), rxReadPos, rxWritePos, b)) break;
+            if (!walkie::ringPop(rxPath.audioBuf, sizeof(rxPath.audioBuf), rxPath.rxReadPos, rxPath.rxWritePos, b)) break;
             int smp = (int)b - walkie::kSilence;
             uint8_t amp = walkie::amplitudeOf(smp);
             if (amp > g_rxPeak) g_rxPeak = amp;
@@ -338,22 +260,14 @@ static void applyChannel(uint8_t ch)
     saveChannel();
 }
 
+// WiFi/PS 设置由 walkie::Radio::init 完成（断连/STA/PS_NONE/信道/功率）
 static void initEspNow()
 {
-    WiFi.disconnect();
-    WiFi.mode(WIFI_STA);
-    esp_wifi_set_ps(WIFI_PS_NONE);
     g_radio.init(gChannel, walkie::kPwrDbm[g_pwrLvl], onDataRecv);
     delay(150);
     walkie::n32SetVolume(g_n32, 6);
 }
 
-static void sendBeacon()
-{
-    uint8_t b[20];
-    size_t n = walkie::buildBeacon(b, sizeof(b), txSeq++, g_myName, g_lossPct, g_peerRssi);
-    if (n > 0) g_radio.send(b, (int)n);
-}
 
 static void espnowSendPCM(const uint8_t *data, size_t len)
 {
@@ -375,7 +289,7 @@ static void enterHome()
     g_txRun = false;
     delay(15);
     codecStopMic();
-    walkie::ringReset(rxWritePos, rxReadPos);
+    walkie::ringReset(rxPath.rxWritePos, rxPath.rxReadPos);
     g_mode = Mode::Home;
     uiFlashClear();
 }
@@ -385,7 +299,7 @@ static void enterTransmit()
     g_txRun = false;
     delay(15);
     codecStopMic();
-    walkie::ringReset(rxWritePos, rxReadPos);
+    walkie::ringReset(rxPath.rxWritePos, rxPath.rxReadPos);
     delay(5);
     codecStartMic();
     g_mode = Mode::Transmit;
@@ -574,41 +488,28 @@ void loop()
 
     // 丢包率窗口结算
     static uint32_t lastWin = 0;
-    if (now - lastWin > walkie::LOSS_WINDOW_MS)
-    {
-        lastWin = now;
-        g_lossPct = walkie::lossWindowPercent(g_lossWin);
-        walkie::lossWindowReset(g_lossWin);
-    }
+    walkie::settleLossWindow(rxPath, now, lastWin);
 
     // 心跳广播（TX 时让位给语音；正在收话时 500ms 快报，让发射端尽快升档）
     static uint32_t lastBeacon = 0;
-    uint32_t beaconIv = (now - g_lastVoiceRxMs < walkie::VOICE_RX_RECENT_MS) ? walkie::BEACON_FAST_MS : walkie::BEACON_INTERVAL_MS;
+    uint32_t beaconIv = walkie::beaconIntervalMs(rxPath, now);
     if (g_mode != Mode::Transmit && now - lastBeacon > beaconIv)
-    { sendBeacon(); lastBeacon = now; }
+    { walkie::sendBeacon(rxPath, g_radio, g_myName, txSeq); lastBeacon = now; }
 
     // 邻居上线提示音
-    if (gPeerJoined)
+    if (rxPath.peerJoined)
     {
-        gPeerJoined = false;
+        rxPath.peerJoined = false;
         if (g_mode != Mode::Transmit) walkie::playCoinChime(codecPlayPCM);
     }
 
     // 闭环功率控制
     static uint32_t lastPwrAdj = 0;
-    if (now - lastPwrAdj > walkie::PWR_ADJ_INTERVAL_MS)
-    {
-        lastPwrAdj = now;
-        bool fresh = (g_fbMs != 0 && now - g_fbMs < walkie::PWR_FB_FRESH_MS);
-        uint8_t lvl = walkie::nextPowerLevel(g_pwrLvl, fresh, g_fbLoss, g_fbRssi,
-                                             g_mode == Mode::Transmit);
-        if (lvl != g_pwrLvl)
-        { g_pwrLvl = lvl; g_radio.setTxPower(walkie::kPwrDbm[lvl]); }
-    }
+    walkie::autoPowerAdjust(rxPath, g_radio, g_pwrLvl, g_mode == Mode::Transmit, now, lastPwrAdj);
 
     // 邻居表维护
     static uint32_t lastPrune = 0;
-    if (now - lastPrune > walkie::PRUNE_INTERVAL_MS) { lastPrune = now; prunePeers(now); }
+    walkie::prunePeersThrottled(rxPath, now, lastPrune);
 
     delay(1);
 }

@@ -9,6 +9,7 @@
 #include "core/walkie_peer.h"
 #include "core/walkie_crypto.h"
 #include "core/walkie_n32.h"
+#include "core/walkie_rxpath.h"
 
 // display.cpp 需要访问的 main.cpp 全局状态
 extern Mode g_mode;
@@ -20,7 +21,7 @@ extern uint16_t g_passBits;
 extern uint8_t g_passLen;
 extern char g_myName[12];
 extern walkie::CryptoState g_crypto;
-int findTalker(uint32_t now);
+extern walkie::RxPath rxPath;
 
 uint32_t g_volDisplayUntil = 0;
 uint32_t g_chDisplayUntil = 0;
@@ -242,7 +243,7 @@ void uiRender(uint32_t now)
         uiShowChannel(gChannel);
         return;
     }
-    int t = findTalker(now);
+    int t = walkie::findTalker(rxPath, now);
     if (t >= 0)
     {
         // 接收中：喇叭图标

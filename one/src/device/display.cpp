@@ -11,6 +11,7 @@
 #include "core/walkie_protocol.h"
 #include "core/walkie_timing.h"
 #include "core/walkie_peer.h"
+#include "core/walkie_rxpath.h"
 
 // display.cpp 需要访问的 main.cpp 全局状态
 extern Mode g_mode;
@@ -23,12 +24,11 @@ extern uint16_t g_tmpBits;
 extern uint8_t g_tmpLen;
 extern walkie::Atomic<uint8_t> gVolume;
 extern walkie::Atomic<uint8_t> g_pwrLvl;
-extern walkie::PeerEntry gPeers[walkie::kMaxPeers];
+extern walkie::RxPath rxPath;
 extern int8_t g_chRssi[14];
 extern uint8_t g_chCount[14];
 extern bool g_scanned;
 extern walkie::Atomic<bool> g_scanBusy;
-int findTalker(uint32_t now);
 
 alphapi::LGFX_AlphaPiOne display;
 
@@ -252,11 +252,11 @@ void drawHomeStatus(uint32_t now)
         present();
         return;
     }
-    int t = findTalker(now);
+    int t = walkie::findTalker(rxPath, now);
     char line[40];
     if (t >= 0)
     {
-        snprintf(line, sizeof(line), "%s 说话中", gPeers[t].name);
+        snprintf(line, sizeof(line), "%s 说话中", rxPath.peers[t].name);
         drawCentered(50, line, TFT_GREEN);
         g_gfx->fillRect(4, 54, 8, 8, TFT_GREEN);
     }
@@ -308,11 +308,11 @@ void drawPairing()
     int row = 0;
     for (int i = 0; i < 8 && row < 4; i++)
     {
-        if (!gPeers[i].used) continue;
+        if (!rxPath.peers[i].used) continue;
         int y = 26 + row * 19;
-        bool talking = (now - gPeers[i].lastVoice < walkie::TALK_TIMEOUT_MS);
+        bool talking = (now - rxPath.peers[i].lastVoice < walkie::TALK_TIMEOUT_MS);
         g_gfx->fillRect(6, y + 4, 8, 8, talking ? TFT_RED : TFT_GREEN);
-        drawCNText(20, y, gPeers[i].name, talking ? TFT_RED : TFT_WHITE);
+        drawCNText(20, y, rxPath.peers[i].name, talking ? TFT_RED : TFT_WHITE);
         row++;
     }
     // 信道占用图（y70..104）：柱=AP数，红=强干扰 绿=安静，黄框=当前
