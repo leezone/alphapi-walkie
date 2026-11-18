@@ -509,8 +509,6 @@ void setup()
     xTaskCreatePinnedToCore(scanTask, "scan", 4096, nullptr, 1, nullptr, 0);
 }
 
-static constexpr size_t PLAY_CHUNK = 300;  // 100 个 8k 样本插值成 24k
-
 void loop()
 {
     uint32_t now = millis();

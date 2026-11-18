@@ -90,7 +90,7 @@ struct Radio
         return p;
     }
 
-    static void radioSendCb(const wifi_tx_info_t *info, esp_now_send_status_t st)
+    static void radioSendCb(const wifi_tx_info_t *, esp_now_send_status_t st)
     {
         Radio *r = activeRadio();
         if (r && st != ESP_NOW_SEND_SUCCESS)

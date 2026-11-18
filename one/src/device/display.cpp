@@ -136,7 +136,6 @@ static void drawCentered(int32_t y, const char *utf8, uint16_t color)
 uint32_t gVolDisplayUntil = 0;
 
 static const int BAR_Y = 78, BAR_H = 10;
-static const int HINT_Y = 108;
 
 static void drawTitle()
 {
