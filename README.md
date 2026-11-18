@@ -64,15 +64,27 @@ cd one && pio run          # AlphaPi One
 
 ## 刷机
 
-`dist/` 下是刷机页面与分段固件（esp-web-tools WebSerial）：
+`dist/<board>/` 下是刷机页面（esptool-js WebSerial，固件已内嵌，离线单页）：
 
 ```
-dist/walkie-one-s/index.html    One S 刷机页（按页面上的说明刷）
-dist/walkie-zero/index.html     Zero 刷机页
-dist/walkie-one/index.html   AlphaPi One 刷机页
+cd dist/walkie-one-s && ./start-flasher.sh   # 或 Windows：双击 start-flasher.cmd
 ```
 
-布局统一为 Arduino 默认 OTA 布局（`app0@0x10000`）：app 写 `0x10000`，`bootloader.bin` 写 `0x1000`（Zero 写 `0x0`），`partition-table.bin` 写 `0x8000`，`boot_app0.bin` 写 `0xe000`。
+然后浏览器打开 `http://localhost:8000`，按页面说明选择串口（Chrome/Edge 桌面版）。
+
+| 页面 | 板 | VID:PID |
+|---|---|---|
+| `dist/walkie-one-s/` | AlphaPi One S（ESP32-S2） | `2f4e:0104` |
+| `dist/walkie-zero/` | AlphaPi Zero（ESP32-C3） | `2f4e:0103` |
+| `dist/walkie-one/` | AlphaPi One（ESP32-S3） | `2f4e:0102` |
+
+注意：
+
+- Web Serial 需要安全环境（HTTPS 或 `localhost`）；双击 HTML 直开会失败，**必须**经 localhost 打开。
+- 当前 Linux 主机上 HETAO 桥的 CDC 接口描述符不被内核接受（cdc_acm 绑定失败，无 `/dev/ttyACM*`），本机 Web Serial 用不了，请在 Windows/macOS 主机刷，或在本机用 `tools/alphapi-flash` 命令行工具刷（见 `dist/*/index.html` 中的命令行步骤）。
+- 页面上的「烧录内置对讲机固件」会整片写入 merged 固件（清空 NVS）；「对讲机四段布局 + 批量导入」可只更新 app（保留 NVS）。
+
+布局统一为 Arduino 默认 OTA 布局（`app0@0x10000`）：app 写 `0x10000`，`bootloader.bin` 写 `0x1000`（Zero 与 One 写 `0x0`），`partition-table.bin` 写 `0x8000`，`boot_app0.bin` 写 `0xe000`。
 
 ## 仓库结构
 
