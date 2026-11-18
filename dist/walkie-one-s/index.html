@@ -378,7 +378,7 @@
         <section class="panel" aria-labelledby="compatTitle">
           <div class="panel-head"><h2 id="compatTitle">使用环境</h2></div>
           <div class="compat">
-            <p>使用桌面版 Chrome 或 Edge，通过 <code>http://localhost</code> 或 HTTPS 打开。当前 Linux 主机因 CDC 描述符限制无法直连（cdc_acm 绑定失败），请使用 Windows/macOS 主机，或使用 tools/alphapi-flash 命令行刷机。</p>
+            <p>使用桌面版 Chrome 或 Edge，通过 <code>http://localhost</code> 或 HTTPS 打开。设备断线重枚举后页面会自动重连；若 20 秒内未重连，请重新点击「选择串口」。当前 Linux 主机因 CDC 描述符限制无法直连（cdc_acm 绑定失败），请使用 Windows/macOS 主机，或使用 tools/alphapi-flash 命令行刷机。</p>
             <p>选择设备时确认 VID:PID 为 <code>2F4E:0104</code>。不要选择其他开发板串口。</p>
             <p>烧录完成并复位后，烧录完成并复位后，对讲机即可使用。</p>
           </div>
@@ -409,9 +409,10 @@ class A extends Error{}
   <script>
     "use strict";
 
-    const FLASH_BYTES = 8 * 1024 * 1024;
+    const FLASH_BYTES_DEFAULT = 8 * 1024 * 1024;
+    const VENDOR_ID = 0x2f4e;
+    const ACCEPT_PIDS = [0x0102, 0x0103, 0x0104];
     const CHIP = "ESP32-S2";
-    const DEVICE_FILTER = { usbVendorId: 0x2f4e, usbProductId: 0x0104 };
     const presets = [
       { address: "0x001000", label: "bootloader.bin" },
       { address: "0x008000", label: "partitions.bin" },
@@ -433,7 +434,10 @@ class A extends Error{}
       transport: null,
       loader: null,
       busy: false,
-      connected: false
+      connected: false,
+      flashBytes: FLASH_BYTES_DEFAULT,
+      reconnectTimer: null,
+      reconnectUntil: 0
     };
 
     const el = Object.fromEntries([
@@ -676,7 +680,7 @@ class A extends Error{}
         if (!Number.isFinite(item.address) || item.address < 0) throw new Error(`地址“${item.row.address}”无效`);
         if (item.address % 4 !== 0) throw new Error(`${item.row.file.name} 的地址必须按 4 字节对齐`);
         if (item.size === 0) throw new Error(`${item.row.file.name} 是空文件`);
-        if (item.end > FLASH_BYTES) throw new Error(`${item.row.file.name} 超出 8 MB Flash（结束于 ${hex(item.end)}）`);
+        if (item.end > state.flashBytes) throw new Error(`${item.row.file.name} 超出 ${formatBytes(state.flashBytes)} Flash（结束于 ${hex(item.end)}）`);
       }
       parsed.sort((a, b) => a.address - b.address);
       for (let i = 1; i < parsed.length; i++) {
@@ -753,12 +757,46 @@ class A extends Error{}
 
       setBusy(true);
       setProgress(0, "选择串口");
+      let port;
       try {
-        state.port = await navigator.serial.requestPort({ filters: [DEVICE_FILTER] });
-        const info = state.port.getInfo();
+        port = await navigator.serial.requestPort({ filters: [{ usbVendorId: VENDOR_ID }] });
+      } catch (error) {
+        setBusy(false);
+        appendLog(`未选择端口：${error.message || error}`, "error");
+        return;
+      }
+      await connectWithPort(port, "pick");
+    }
+
+    async function tryReconnect() {
+      const ports = await navigator.serial.getPorts();
+      return ports.find(p => { const i = p.getInfo(); return i.usbVendorId === VENDOR_ID && ACCEPT_PIDS.includes(i.usbProductId); }) || null;
+    }
+
+    function scheduleReconnect(ms = 20000) {
+      if (state.reconnectTimer) return;
+      state.reconnectUntil = Date.now() + ms;
+      setProgress(0, "设备已断开，等待重连…");
+      state.reconnectTimer = setInterval(async () => {
+        if (Date.now() > state.reconnectUntil) { clearInterval(state.reconnectTimer); state.reconnectTimer = null; setProgress(0, "等待操作"); return; }
+        const port = await tryReconnect();
+        if (!port) return;
+        clearInterval(state.reconnectTimer);
+        state.reconnectTimer = null;
+        appendLog("检测到设备重新出现，自动重连中");
+        await connectWithPort(port, "reconnect");
+      }, 1000);
+    }
+
+    async function connectWithPort(port, mode) {
+      setBusy(true);
+      setProgress(0, mode === "pick" ? "选择串口" : "设备重枚举，正在重连");
+      try {
+        state.port = port;
+        const info = port.getInfo();
         const vid = info.usbVendorId ?? 0;
         const pid = info.usbProductId ?? 0;
-        if (vid !== DEVICE_FILTER.usbVendorId || pid !== DEVICE_FILTER.usbProductId) {
+        if (vid !== VENDOR_ID || !ACCEPT_PIDS.includes(pid)) {
           throw new Error(`设备 VID:PID 为 ${vid.toString(16).padStart(4, "0")}:${pid.toString(16).padStart(4, "0")}，不是 AlphaPi One S 的 2f4e:0104`);
         }
         appendLog("已选择 AlphaPi One S（VID:PID 2F4E:0104）");
@@ -766,12 +804,13 @@ class A extends Error{}
 
         state.transport = new EsptoolJS.Transport(state.port, false);
         state.transport.setDeviceLostCallback(() => {
-          appendLog("串口设备已断开；按 Reset 时 USB 节点短暂消失属于本板已知行为", "error");
+          appendLog("串口设备已断开，等待重新枚举…", "error");
           state.transport = null;
           state.loader = null;
           state.port = null;
           updateConnection(false);
-          showMessage("设备已断开。如刚按了 Reset，请等待重新枚举后再次选择串口。", "info");
+          showMessage("设备已断开，重新出现时页面将自动重连（20 秒内）。", "info");
+          scheduleReconnect(20000);
         });
         state.loader = new EsptoolJS.ESPLoader({ transport: state.transport, baudrate: 115200, terminal, debugLogging: false });
         const mode = document.querySelector('input[name="resetMode"]:checked').value;
@@ -811,8 +850,12 @@ class A extends Error{}
         const chip = await state.loader.chip.getChipDescription(state.loader);
         const mac = await state.loader.chip.readMac(state.loader);
         const flashSize = await state.loader.detectFlashSize();
-        if (flashSize !== "8MB") throw new Error(`检测到 Flash 容量为 ${flashSize}，预期为 8MB，已拒绝继续`);
-        await configureRomFlashParameters(FLASH_BYTES);
+        const sizeMB = parseInt(String(flashSize), 10);
+        if (!Number.isFinite(sizeMB) || (sizeMB !== 4 && sizeMB !== 8)) {
+          throw new Error(`检测到 Flash 容量为 ${flashSize}，本工具只支持 4MB / 8MB，已拒绝继续`);
+        }
+        state.flashBytes = sizeMB * 1024 * 1024;
+        await configureRomFlashParameters(state.flashBytes);
         if (typeof state.loader.runSpiflashCommand === "function") {
           try {
             // Match official esptool: reset residual XMC state after the
@@ -826,6 +869,7 @@ class A extends Error{}
           }
         }
         updateConnection(true, `${chip} · ${mac}`);
+        if (state.reconnectTimer) { clearInterval(state.reconnectTimer); state.reconnectTimer = null; }
         setProgress(0, "设备就绪");
         showMessage("已连接 ESP32-S2 ROM，可以开始烧录。", "success");
         appendLog(`芯片：${chip}，MAC：${mac}，Flash：${flashSize}`, "success");
@@ -992,8 +1036,10 @@ class A extends Error{}
 
     navigator.serial?.addEventListener("disconnect", event => {
       if (state.port && event.target === state.port) {
+        appendLog("系统串口节点已消失，等待重新枚举…", "error");
         state.transport = null; state.loader = null; state.port = null;
         updateConnection(false);
+        scheduleReconnect(20000);
       }
     });
 
