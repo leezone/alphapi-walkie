@@ -380,7 +380,7 @@
           <div class="panel-head"><h2 id="compatTitle">使用环境</h2></div>
           <div class="compat">
             <p>使用桌面版 Chrome 或 Edge，通过 <code>http://localhost</code> 或 HTTPS 打开。设备断线重枚举后页面会自动重连；若 20 秒内未重连，请重新点击「选择串口」。当前 Linux 主机因 CDC 描述符限制无法直连（cdc_acm 绑定失败），请使用 Windows/macOS 主机，或使用 tools/alphapi-flash 命令行刷机。</p>
-            <p>选择设备时确认 VID:PID 为 <code>2F4E:0103</code>。不要选择其他开发板串口。</p>
+            <p>选择设备时确认 VID:PID 为 <code>2F4E:0101</code> 或 <code>2F4E:0103</code>（同一块 Zero 在两种模式下会切换）。不要选择其他开发板串口。</p>
             <p>烧录完成并复位后，烧录完成并复位后，对讲机即可使用。</p>
           </div>
         </section>
@@ -412,7 +412,7 @@ class A extends Error{}
 
     const FLASH_BYTES_DEFAULT = 8 * 1024 * 1024;
     const VENDOR_ID = 0x2f4e;
-    const ACCEPT_PIDS = [0x0102, 0x0103, 0x0104];
+    const ACCEPT_PIDS = [0x0101, 0x0102, 0x0103, 0x0104];
     const CHIP = "ESP32-C3";
     const presets = [
       { address: "0x000000", label: "bootloader.bin" },
@@ -815,9 +815,9 @@ class A extends Error{}
         const vid = info.usbVendorId ?? 0;
         const pid = info.usbProductId ?? 0;
         if (vid !== VENDOR_ID || !ACCEPT_PIDS.includes(pid)) {
-          throw new Error(`设备 VID:PID 为 ${vid.toString(16).padStart(4, "0")}:${pid.toString(16).padStart(4, "0")}，不是 AlphaPi Zero 的 2f4e:0103`);
+          throw new Error(`设备 VID:PID 为 ${vid.toString(16).padStart(4, "0")}:${pid.toString(16).padStart(4, "0")}，不是 AlphaPi Zero（VID:PID 应为 2F4E:0101 或 2F4E:0103）`);
         }
-        appendLog("已选择 AlphaPi Zero（VID:PID 2F4E:0103）");
+        appendLog(`已选择 AlphaPi Zero（VID:PID 2F4E:${pid.toString(16).padStart(4, "0").toUpperCase()}）`);
         appendLog("正在以 115200 baud 连接 ESP32-C3 ROM，不运行 stub");
 
         state.transport = new EsptoolJS.Transport(state.port, false);
@@ -1064,7 +1064,7 @@ class A extends Error{}
     loadPreset();
     if (!("serial" in navigator)) showMessage("当前浏览器不支持 Web Serial，请使用桌面版 Chrome 或 Edge。", "error");
     else if (!window.isSecureContext) showMessage("请通过 http://localhost 或 HTTPS 打开页面，Web Serial 才能使用。", "error");
-    appendLog("页面已就绪。内置 对讲机 0.1 合并固件可用；设备校验：AlphaPi Zero（VID:PID 2F4E:0103）");
+    appendLog("页面已就绪。内置 对讲机 0.1 合并固件可用；设备校验：AlphaPi Zero（VID:PID 2F4E:0101 / 2F4E:0103）");
   </script>
 </body>
 </html>
